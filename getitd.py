@@ -88,6 +88,28 @@ else:
 
 
 
+def write_alignment_progress(
+    config, read, event, elapsed_seconds=None, aligned=None, error_type=None
+):
+    if not config.get("LOG_ALIGNMENT_PROGRESS", 0):
+        return
+
+    fields = [
+        datetime.datetime.now().isoformat(timespec="milliseconds"),
+        str(os.getpid()),
+        str(getattr(read, "alignment_id", "")),
+        event,
+        str(len(read.seq)),
+        str(read.counts),
+        "" if elapsed_seconds is None else "{:.6f}".format(elapsed_seconds),
+        "" if aligned is None else str(aligned),
+        error_type or "",
+    ]
+    with open(config["ALIGNMENT_PROGRESS_FILE"], "a") as progress_log:
+        progress_log.write("\t".join(fields) + "\n")
+        progress_log.flush()
+
+
 class Read(object):
     """
     Sequencing read.
@@ -136,6 +158,7 @@ class Read(object):
         self.al_seq = al_seq
         self.al_ref = al_ref
         self.al_file = al_file
+        self.alignment_id = None
         assert self.counts > 0
         if self.bqs is not None:
             assert len(self.seq) == len(self.bqs)
@@ -213,24 +236,49 @@ class Read(object):
         Returns:
             Aligned Read. May be reversed for 454.
         """
-        alignment = bio.align.globalds(self.seq, config["REF"], config["COST_ALIGNED"],
-                config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
-        if alignment:
-            self.al_seq, self.al_ref, self.al_score = alignment[-1][0:3]
-            if not self.sense:
-                self.sense = 1
+        log_progress = config.get("LOG_ALIGNMENT_PROGRESS", 0)
+        alignment_started = timeit.default_timer() if log_progress else None
+        if log_progress:
+            write_alignment_progress(config, self, "START")
+        aligned_read = self
+        try:
+            alignment = bio.align.globalds(self.seq, config["REF"], config["COST_ALIGNED"],
+                    config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
+            if alignment:
+                self.al_seq, self.al_ref, self.al_score = alignment[-1][0:3]
+                if not self.sense:
+                    self.sense = 1
 
-        if config["INFER_SENSE_FROM_ALIGNMENT"]:
-            rev = self.reverse_complement()
-            rev_alignment = bio.align.globalds(rev.seq, config["REF"], config["COST_ALIGNED"],
-                config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
-            if (rev_alignment and
-                    (self.al_score is None or rev_alignment[-1][2] > self.al_score)):
-                rev.al_seq, rev.al_ref, rev.al_score = rev_alignment[-1][0:3]
-                if not rev.sense:
-                    rev.sense = -1
-                return rev
-        return self
+            if config["INFER_SENSE_FROM_ALIGNMENT"]:
+                rev = self.reverse_complement()
+                rev_alignment = bio.align.globalds(rev.seq, config["REF"], config["COST_ALIGNED"],
+                    config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
+                if (rev_alignment and
+                        (self.al_score is None or rev_alignment[-1][2] > self.al_score)):
+                    rev.al_seq, rev.al_ref, rev.al_score = rev_alignment[-1][0:3]
+                    if not rev.sense:
+                        rev.sense = -1
+                    aligned_read = rev
+        except Exception as error:
+            if log_progress:
+                write_alignment_progress(
+                    config,
+                    self,
+                    "ERROR",
+                    elapsed_seconds=timeit.default_timer() - alignment_started,
+                    error_type=type(error).__name__,
+                )
+            raise
+
+        if log_progress:
+            write_alignment_progress(
+                config,
+                self,
+                "DONE",
+                elapsed_seconds=timeit.default_timer() - alignment_started,
+                aligned=aligned_read.al_score is not None,
+            )
+        return aligned_read
 
     def get_ref_span(self):
         """
@@ -1771,6 +1819,12 @@ def parse_config_from_cmdline(config):
     parser.add_argument("-plot_coverage", help="If True, plot read coverage across the reference to 'coverage.png' in the respective output folder (default False)", default=False, type=str_to_bool)
     parser.add_argument("-technology", help="Sequencing technology used, options are '454' or 'Illumina' (default). '454' sets -infer_sense_from_alignment to True and -min_read_copies to 1, regardless of the respective command line options used; 'Illumina' will instead use these command line options or their respective defaults.", default="Illumina", type=str, choices=['Illumina', '454'])
     parser.add_argument("-infer_sense_from_alignment", help="If True, infer each read's sense by aligning it as a forward and reverse read and keeping the better alignment (default False).", default=False, type=str_to_bool)
+    parser.add_argument(
+        "-log_alignment_progress",
+        help="If True, append per-read alignment start/completion events to alignment-progress.tsv (default False).",
+        default=False,
+        type=str_to_bool,
+    )
     parser.add_argument('-nkern', help="number of cores to use for parallel tasks (default 12)", default="12", type=int)
     parser.add_argument('-gap_open', help="alignment cost of gap opening (default -36)", default="-36", type=int)
     parser.add_argument('-gap_extend', help="alignment cost of gap extension (default -0.5)", default="-0.5", type=float)
@@ -1801,6 +1855,7 @@ def parse_config_from_cmdline(config):
     else:
         config["INFER_SENSE_FROM_ALIGNMENT"] = cmd_args.infer_sense_from_alignment
     config["PLOT"] = cmd_args.plot_coverage
+    config["LOG_ALIGNMENT_PROGRESS"] = int(cmd_args.log_alignment_progress)
 
     # R2 reads are reverse-complemented prior to alignment to the WT reference sequence
     # --> reverse-complement any sequence later to be found within reverse-complemented R2 reads
@@ -2023,9 +2078,12 @@ def main(config):
     config["OUT_COV_FILE"] = os.path.join(config["OUT_DIR"], "coverage.txt")
     config["STATS_FILE"] = os.path.join(config["OUT_DIR"], "stats.txt")
     config["CONFIG_FILE"] = os.path.join(config["OUT_DIR"], "config.txt")
+    config["ALIGNMENT_PROGRESS_FILE"] = os.path.join(
+        config["OUT_DIR"], "alignment-progress.tsv"
+    )
 
     # make all input & output file / folder names absolute paths
-    for file_ in ["R1", "R2", "REF_FILE", "ANNO_FILE", "OUT_DIR", "STATS_FILE", "CONFIG_FILE", "OUT_COV_FILE", "OUT_COV_PLOT"]:
+    for file_ in ["R1", "R2", "REF_FILE", "ANNO_FILE", "OUT_DIR", "STATS_FILE", "CONFIG_FILE", "ALIGNMENT_PROGRESS_FILE", "OUT_COV_FILE", "OUT_COV_PLOT"]:
         if config[file_]:
             config[file_] = make_file_path_absolute(config[file_])
 
@@ -2044,6 +2102,12 @@ def main(config):
     #  the correct config.txt file later on despite static / constant filename
     os.chdir(config["OUT_DIR"])
     save_config(config, config["CONFIG_FILE"])
+    if config["LOG_ALIGNMENT_PROGRESS"]:
+        with open(config["ALIGNMENT_PROGRESS_FILE"], "w") as progress_log:
+            progress_log.write(
+                "timestamp\tpid\talignment_id\tevent\tread_length\tread_copies"
+                "\telapsed_seconds\taligned\terror_type\n"
+            )
 
     ## REMOVE OLD STATS & LOG FILE & START CREATING A NEW ONE
     try:
@@ -2092,6 +2156,9 @@ def main(config):
     if config["INFER_SENSE_FROM_ALIGNMENT"]:
         save_stats("Inferring sense from alignment!", config["STATS_FILE"])
     start_time = timeit.default_timer()
+    if config["LOG_ALIGNMENT_PROGRESS"]:
+        for alignment_id, read in enumerate(reads, start=1):
+            read.alignment_id = alignment_id
     reads = parallelize(Read.align, reads, config["NKERN"])
     print("Alignment took {} s".format(round(timeit.default_timer() - start_time, 2)))
 
