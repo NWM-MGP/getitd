@@ -1,6 +1,9 @@
 import getitd
 import random
 import itertools
+import os
+import tempfile
+from unittest.mock import patch
 
 config = {}
 config["SAMPLE"] = "testtesttest"
@@ -145,6 +148,48 @@ def test_align_wt_R1_with_5prime_insert():
     assert read_aligned.al_score == getitd.get_min_score(read.seq[len(insert):], config["REF"], 1)
 
 
+
+
+
+def test_alignment_progress_option_defaults_off_and_can_be_enabled():
+    with patch("sys.argv", ["getitd.py", "sample", "reads.fastq"]):
+        default_config = getitd.parse_config_from_cmdline({})
+    assert default_config["LOG_ALIGNMENT_PROGRESS"] == 0
+
+    with patch("sys.argv", ["getitd.py", "sample", "reads.fastq", "-log_alignment_progress", "True"]):
+        enabled_config = getitd.parse_config_from_cmdline({})
+    assert enabled_config["LOG_ALIGNMENT_PROGRESS"] == 1
+
+
+def test_align_writes_start_and_done_progress_events():
+    with tempfile.TemporaryDirectory() as output_dir:
+        progress_file = os.path.join(output_dir, "alignment-progress.tsv")
+        progress_config = dict(config)
+        progress_config["LOG_ALIGNMENT_PROGRESS"] = 1
+        progress_config["ALIGNMENT_PROGRESS_FILE"] = progress_file
+        read = getitd.Read(config["REF"])
+        read.alignment_id = 7
+
+        aligned_read = read.align(progress_config)
+
+        with open(progress_file) as log_file:
+            events = [line.rstrip("\n").split("\t") for line in log_file]
+
+    assert [event[3] for event in events] == ["START", "DONE"]
+    assert all(event[2] == "7" for event in events)
+    assert events[1][7] == "True"
+    assert aligned_read.al_score is not None
+
+
+def test_align_does_not_write_progress_when_disabled():
+    with tempfile.TemporaryDirectory() as output_dir:
+        progress_file = os.path.join(output_dir, "alignment-progress.tsv")
+        progress_config = dict(config)
+        progress_config["LOG_ALIGNMENT_PROGRESS"] = 0
+        progress_config["ALIGNMENT_PROGRESS_FILE"] = progress_file
+        getitd.Read(config["REF"]).align(progress_config)
+
+        assert not os.path.exists(progress_file)
 
 
 ##############################
