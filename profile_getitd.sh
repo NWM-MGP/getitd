@@ -80,15 +80,28 @@ case "$dataset" in
         ;;
 esac
 
+# Keep sample-specific inputs in a local, ignored configuration file.
+config_file="${PROFILE_CONFIG:-$repo_dir/profile_getitd.local.conf}"
+if [[ ! -r "$config_file" ]]; then
+    printf 'Cannot read profiling config: %s\n' "$config_file" >&2
+    printf 'Copy profile_getitd.local.conf.example to profile_getitd.local.conf and edit it.\n' >&2
+    exit 2
+fi
+# shellcheck source=/dev/null
+source "$config_file"
+for setting in forward_filename reverse_filename annotation sample_id; do
+    if [[ -z "${!setting:-}" ]]; then
+        printf 'Missing %s in profiling config: %s\n' "$setting" "$config_file" >&2
+        exit 2
+    fi
+done
+
 # Profiling and getITD settings not exposed as command-line options.
 python="$repo_dir/.venv-profile/bin/python"
-forward="$dataset_dir/26NM-231D00526-1.R1.fastq.gz"
-reverse="$dataset_dir/26NM-231D00526-1.R2.fastq.gz"
+forward="$dataset_dir/$forward_filename"
+reverse="$dataset_dir/$reverse_filename"
 # Alignment sequence and coordinate annotation are separate inputs.
 reference="$repo_dir/anno/amplicon.txt"
-annotation="/Users/NM346413/Development/heme-mrd-pipeline/scripts/hg38_liftover_amplicon_kayser.tsv"
-# Sample ID names getITD's output directory within each unique run directory.
-sample_id="26NM-231D00526-1"
 results_dir="$repo_dir/test/output/profiles"
 # Set the number of threads for parallel processing.
 workers=8

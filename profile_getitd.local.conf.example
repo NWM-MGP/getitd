@@ -1,0 +1,4 @@
+forward_filename="sample_R1.fastq.gz"
+reverse_filename="sample_R2.fastq.gz"
+annotation="/path/to/annotation.tsv"
+sample_id="sample"

@@ -141,9 +141,11 @@ datasets and writes results under `test/output/profiles/`:
 ```
 
 Use `1pct_flt3_filtered` for the downsampled dataset. The default mode is
-`scalene`; `baseline` runs without Scalene instrumentation. This script uses the
-local `.venv-profile` environment and a configured annotation file path, so
-check those paths in `profile_getitd.sh` before running it in another checkout.
+`scalene`; `baseline` runs without Scalene instrumentation. Before running the
+script, copy `profile_getitd.local.conf.example` to
+`profile_getitd.local.conf` and set the input filenames, annotation path, and
+sample ID in that local configuration. The config file is ignored by Git. The
+script uses the local `.venv-profile` environment.
 
 ## getITD core program
 ### Input
