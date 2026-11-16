@@ -109,6 +109,42 @@ Repeat these two steps to reach the desired destination.
 
 Alternatively, provide full or relative paths to all files, including the _getitd.py_ script, input FASTQ files and reference and annotation files, whenever you use getITD.
 
+## Docker
+
+Build from the repository root (requires access to the private base image):
+
+```bash
+docker build --platform linux/amd64 -t getitd-1.5.17:0.1.0 .
+```
+
+Run the bundled example from a mounted working directory:
+
+```bash
+docker run --rm --platform linux/amd64 \
+    --user "$(id -u):$(id -g)" \
+    -v "$PWD:/work" -w /work \
+    getitd-1.5.17:0.1.0 \
+    getitd test test/test_R1.fastq test/test_R2.fastq -nkern 2
+```
+
+The launcher uses the bundled reference and annotation by default. Pass
+`-reference` and `-anno` to override them. Results are written to
+`<sampleID>_getitd/` in the working directory.
+
+## Profiling
+
+The repository-specific profiling script selects one of its two FLT3-filtered
+datasets and writes results under `test/output/profiles/`:
+
+```bash
+./profile_getitd.sh --dataset full_size_flt3_filtered --mode baseline --run-name full-size-baseline
+```
+
+Use `1pct_flt3_filtered` for the downsampled dataset. The default mode is
+`scalene`; `baseline` runs without Scalene instrumentation. This script uses the
+local `.venv-profile` environment and a configured annotation file path, so
+check those paths in `profile_getitd.sh` before running it in another checkout.
+
 ## getITD core program
 ### Input
 ###### Required:
@@ -437,4 +473,3 @@ python3 getitd.py -forward_primer GCAATTTAGGTATGAAAGCCAGCTAC -- test test/test_R
 
 ## getITD wrappers - running getITD without the commandline
 Two additional scripts are provided to facilitate getITD analysis by alleviating the need to use the commandline. The first, make_getitd_config.py, when double-clicked, creates a simple graphical interface and asks the user to select desired analysis parameters and annotation / reference files. These parameters are then saved to a config.txt file. When this config.txt is placed in a folder containing both getitd_from_config_wrapper.py and an arbitrary number of FASTQ files to analyze, double-clicking the wrapper script will initiate sequential analysis of all of the provided FASTQ files using parameters stored in config.txt. Though these wrapper scripts were originally intended primarily to facilitate analysis on Windows, they run also on Linux and Mac.
-
