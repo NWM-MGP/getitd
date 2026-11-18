@@ -131,6 +131,43 @@ def test_align_ref():
     assert read_aligned.al_ref == config["REF"]
     assert read_aligned.al_score == getitd.get_min_score(read.seq, config["REF"], 1)
 
+
+def test_local_alignment_tuple_uses_raw_segments_and_reference_coordinates():
+    seq1 = "AACCGGTT"
+    seq2 = "CCGG"
+    alignment = getitd._make_aligner(config, mode="local").align(seq1, seq2)[-1]
+
+    formatted = getitd._local_alignment_to_tuple(alignment, seq1, seq2)
+
+    assert formatted[0] == str(alignment[0])
+    assert formatted[1] == str(alignment[1])
+    assert formatted[2] == alignment.score
+    assert formatted[3] == int(alignment.coordinates[1, 0])
+    assert formatted[4] == int(alignment.coordinates[1, -1])
+    assert formatted[0] != seq1
+
+
+def test_tuple_begin_coordinate_is_used_for_first_aligned_base():
+    formatted = ("CCGG", "CCGG", 20, 2, 6)
+    assert getitd.get_first_aligned_bp_index(formatted) == 2
+
+
+def test_align_empty_read_returns_unaligned_read():
+    read = getitd.Read("")
+
+    aligned_read = read.align(config)
+
+    assert aligned_read is read
+    assert aligned_read.al_score is None
+
+
+def test_empty_insert_is_not_similar_to_nonempty_insert():
+    empty_insert = getitd.Insert("", 0, -1, 1)
+    nonempty_insert = getitd.Insert("A", 0, 0, 1)
+
+    assert not empty_insert.is_similar_to(nonempty_insert, config)
+
+
 def test_align_wt_R1():
     read = getitd.Read(config["REF"][0:250])
     read_aligned = getitd.Read.align(read, config=config) 
@@ -1155,4 +1192,3 @@ def test_1610_264_198bp_04_nonTrailingThoughShouldBeTrailingITD():
     itd.annotate("insertion_site", "protein_as", config)
     assert abs(itd.length - 198) <= 1
     assert itd.insertion_site_protein_as in ["614", "615"]
-
