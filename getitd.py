@@ -112,16 +112,33 @@ def _make_aligner(config, mode="global", penalize_end_gaps=True):
     return aligner
 
 
-def _local_alignment_to_tuple(alignment, _seq1, _seq2):
+def _local_alignment_to_tuple(alignment, seq1, seq2):
     """Format a local alignment as a pairwise2-compatible tuple."""
+    seq1_start, seq1_end = alignment.coordinates[0, [0, -1]]
     seq2_start, seq2_end = alignment.coordinates[1, [0, -1]]
+    seq1_start, seq1_end = int(seq1_start), int(seq1_end)
     seq2_start, seq2_end = int(seq2_start), int(seq2_end)
+
+    aligned_seq1 = str(alignment[0])
+    aligned_seq2 = str(alignment[1])
+    prefix_length = max(seq1_start, seq2_start)
+    prefix1 = "-" * (prefix_length - seq1_start) + seq1[:seq1_start]
+    prefix2 = "-" * (prefix_length - seq2_start) + seq2[:seq2_start]
+
+    suffix1 = seq1[seq1_end:]
+    suffix2 = seq2[seq2_end:]
+    suffix_length = max(len(suffix1), len(suffix2))
+    suffix1 += "-" * (suffix_length - len(suffix1))
+    suffix2 += "-" * (suffix_length - len(suffix2))
+
+    start = prefix_length
+    end = start + len(aligned_seq1)
     return (
-        str(alignment[0]),
-        str(alignment[1]),
+        prefix1 + aligned_seq1 + suffix1,
+        prefix2 + aligned_seq2 + suffix2,
         alignment.score,
-        seq2_start,
-        seq2_end,
+        start,
+        end,
     )
 
 
@@ -286,6 +303,8 @@ class Read(object):
             else:
                 alignments = None
             if alignments is not None and len(alignments):
+                # TODO: This picks one optimal placement by list order; no
+                # biologically meaningful or stable tie-break has been established.
                 alignment = alignments[-1]
                 self.al_seq = str(alignment[0])
                 self.al_ref = str(alignment[1])
@@ -304,6 +323,8 @@ class Read(object):
                 if (rev_alignments is not None and len(rev_alignments) and
                         (self.al_score is None or
                          rev_alignments[-1].score > self.al_score)):
+                    # The same list-order tie caveat applies to reverse-strand
+                    # placements; equal forward/reverse scores keep the forward read.
                     alignment = rev_alignments[-1]
                     rev.al_seq = str(alignment[0])
                     rev.al_ref = str(alignment[1])
@@ -864,14 +885,16 @@ class Insert(object):
         # note that it's >= tandem2_start + length -1 because the last tandem2 bp is allowed to be the insert-preceding WT bp
         # it does have to be start < tandem2_start though.
         # --> note that this filters out triple tandem duplications! (because there is only one tandem length between insert's self.start and tandem2_start, but self.length = 2* tandem length)
-        alignments = [al for al in alignments if self.start < get_first_aligned_bp_index(al) or self.start >= get_first_aligned_bp_index(al) + self.length -1]
+        alignments = [al for al in alignments if self.start < get_first_aligned_bp_index(al[0]) or self.start >= get_first_aligned_bp_index(al[0]) + self.length -1]
         if not alignments:
             return None
         # The tuple contains aligned sequences, score, and alignment coordinates.
+        # TODO: The final optimal placement is selected by aligner list order;
+        # define and test an explicit tie-break policy before relying on it.
         alignment = alignments[-1]
         alignment_score, alignment_start, alignment_end = alignment[2:5]
         if alignment_score >= get_min_score(self.seq, config["REF"], config["MIN_SCORE_INSERTS"]):
-            tandem2_start = get_first_aligned_bp_index(alignment)
+            tandem2_start = get_first_aligned_bp_index(alignment[0])
             offset = abs(tandem2_start - self.start)
             # offset = 1 for adjacent insert-tandem2
             # offset = insert.length-1 for adjacent tandem2-insert
@@ -1337,17 +1360,14 @@ def get_gaps(seq):
     return gap_idxs_sep
 
 
-def get_first_aligned_bp_index(alignment):
+def get_first_aligned_bp_index(alignment_seq):
     """
-    Return the absolute position of the first aligned base in seq2/reference.
-
-    Accepts a pairwise2-compatible tuple (returning its reference begin
-    coordinate) or a string (returning the first non-gap column).
+    Given an alignment string, return the index of the first aligned,
+    i.e. non-gap position (0-indexed!).
     """
-    if isinstance(alignment, (tuple, list)):
-        return alignment[3]
-
-    index_of_first_aligned_bp = [i for i, bp in enumerate(alignment) if bp != '-'][0]
+    index_of_first_aligned_bp = [
+        i for i, bp in enumerate(alignment_seq) if bp != '-'
+    ][0]
     return index_of_first_aligned_bp
 
 
