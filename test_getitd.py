@@ -131,6 +131,74 @@ def test_align_ref():
     assert read_aligned.al_ref == config["REF"]
     assert read_aligned.al_score == getitd.get_min_score(read.seq, config["REF"], 1)
 
+
+def test_local_alignment_tuple_preserves_pairwise2_overhang_format():
+    seq1 = "AACCGGTT"
+    seq2 = "CCGG"
+    alignment = getitd._make_aligner(config, mode="local").align(seq1, seq2)[-1]
+
+    formatted = getitd._local_alignment_to_tuple(alignment, seq1, seq2)
+
+    assert formatted[0] == "AACCGGTT"
+    assert formatted[1] == "--CCGG--"
+    assert len(formatted[0]) == len(formatted[1])
+    assert formatted[2] == alignment.score
+    assert formatted[3] == 2
+    assert formatted[4] == 6
+
+
+def test_local_alignment_tuple_keeps_query_row_index_distinct_from_begin():
+    seq1 = "AACCGGTT"
+    seq2 = "CCGG"
+    alignment = getitd._make_aligner(config, mode="local").align(seq1, seq2)[-1]
+
+    formatted = getitd._local_alignment_to_tuple(alignment, seq1, seq2)
+
+    assert formatted[3] == 2
+    assert getitd.get_first_aligned_bp_index(formatted[0]) == 0
+
+
+def test_local_alignment_tuple_formats_internal_gap_and_unequal_overhangs():
+    seq1 = "TACGTACTGACGATTTTTGATCCAGTGCATA"
+    seq2 = "GGGACGTACTGACGAGATCCAGTGCATCCC"
+    alignment = getitd._make_aligner(config, mode="local").align(seq1, seq2)[-1]
+
+    formatted = getitd._local_alignment_to_tuple(alignment, seq1, seq2)
+
+    assert formatted[0] == "--TACGTACTGACGATTTTTGATCCAGTGCATA--"
+    assert formatted[1] == "GGGACGTACTGACGA-----GATCCAGTGCATCCC"
+    assert len(formatted[0]) == len(formatted[1])
+    assert formatted[2:] == (82.0, 3, 32)
+
+
+def test_local_alignment_tuple_tracks_unscored_insert_prefix():
+    seq1 = "AACCGGTT"
+    seq2 = "TTCCGGAA"
+    alignment = getitd._make_aligner(config, mode="local").align(seq1, seq2)[-1]
+
+    formatted = getitd._local_alignment_to_tuple(alignment, seq1, seq2)
+
+    assert getitd.get_first_aligned_bp_index(formatted[0]) == 0
+    assert formatted[3] == max(int(alignment.coordinates[0, 0]),
+                               int(alignment.coordinates[1, 0]))
+
+
+def test_align_empty_read_returns_unaligned_read():
+    read = getitd.Read("")
+
+    aligned_read = read.align(config)
+
+    assert aligned_read is read
+    assert aligned_read.al_score is None
+
+
+def test_empty_insert_is_not_similar_to_nonempty_insert():
+    empty_insert = getitd.Insert("", 0, -1, 1)
+    nonempty_insert = getitd.Insert("A", 0, 0, 1)
+
+    assert not empty_insert.is_similar_to(nonempty_insert, config)
+
+
 def test_align_wt_R1():
     read = getitd.Read(config["REF"][0:250])
     read_aligned = getitd.Read.align(read, config=config) 
@@ -1141,9 +1209,11 @@ def test_1610_264_198bp_03():
     assert itd.insertion_site_protein_as in ["614", "615"]
 
 def test_1610_264_198bp_04_nonTrailingThoughShouldBeTrailingITD():
-    read = getitd.Read(seq="GAAATTTAGGTATGAAAGCCAGCTACAGATGGTACAGGTGACCGGCTCCTCAGATAATGAGTACTTCTACGTTGATTTCAGAGAATATGAATATGATCTCAAATGGGAGTTTCCAAGAGAAAATTTAGAGTTTGGTAAGAATGGAATGTGCCAAATGTTTCTGCAGCATTTCTTTTCCATTGGAAAATCTTTAAAATGCACGTACTCACCATTTGTCTTTGCAGGGAAGCCACAGGTGACCGGCTCCTCAG").align(config).get_ref_span()
+    test_config = dict(config)
+    test_config["MAX_TRAILING_BP"] = 1
+    read = getitd.Read(seq="GAAATTTAGGTATGAAAGCCAGCTACAGATGGTACAGGTGACCGGCTCCTCAGATAATGAGTACTTCTACGTTGATTTCAGAGAATATGAATATGATCTCAAATGGGAGTTTCCAAGAGAAAATTTAGAGTTTGGTAAGAATGGAATGTGCCAAATGTTTCTGCAGCATTTCTTTTCCATTGGAAAATCTTTAAAATGCACGTACTCACCATTTGTCTTTGCAGGGAAGCCACAGGTGACCGGCTCCTCAG").align(test_config).get_ref_span()
     read.print()
-    inserts = read.get_inserts(config)
+    inserts = read.get_inserts(test_config)
     assert len(inserts) == 1
     insert = inserts[0]
     insert.print()
@@ -1155,4 +1225,3 @@ def test_1610_264_198bp_04_nonTrailingThoughShouldBeTrailingITD():
     itd.annotate("insertion_site", "protein_as", config)
     assert abs(itd.length - 198) <= 1
     assert itd.insertion_site_protein_as in ["614", "615"]
-

@@ -1,7 +1,7 @@
 __version__ = '1.5.17'
 
 
-import Bio.pairwise2 as bio
+from Bio.Align import PairwiseAligner, substitution_matrices
 import timeit
 import collections
 import itertools
@@ -85,6 +85,61 @@ else:
     except NameError:
         config = {}
 
+
+def _make_aligner(config, mode="global", penalize_end_gaps=True):
+    """Create a PairwiseAligner using getITD's configured scoring scheme."""
+    scores = config["COST_ALIGNED"]
+    alphabet = sorted({base for pair in scores for base in pair})
+    matrix = substitution_matrices.Array(alphabet="".join(alphabet), dims=2)
+    for base1 in alphabet:
+        for base2 in alphabet:
+            if (base1, base2) in scores:
+                score = scores[(base1, base2)]
+            elif (base2, base1) in scores:
+                score = scores[(base2, base1)]
+            else:
+                raise KeyError((base1, base2))
+            matrix[base1, base2] = score
+
+    aligner = PairwiseAligner()
+    aligner.mode = mode
+    aligner.substitution_matrix = matrix
+    aligner.open_gap_score = config["COST_GAPOPEN"]
+    aligner.extend_gap_score = config["COST_GAPEXTEND"]
+    if not penalize_end_gaps:
+        aligner.target_end_gap_score = 0
+        aligner.query_end_gap_score = 0
+    return aligner
+
+
+def _local_alignment_to_tuple(alignment, seq1, seq2):
+    """Format a local alignment as a pairwise2-compatible tuple."""
+    seq1_start, seq1_end = alignment.coordinates[0, [0, -1]]
+    seq2_start, seq2_end = alignment.coordinates[1, [0, -1]]
+    seq1_start, seq1_end = int(seq1_start), int(seq1_end)
+    seq2_start, seq2_end = int(seq2_start), int(seq2_end)
+
+    aligned_seq1 = str(alignment[0])
+    aligned_seq2 = str(alignment[1])
+    prefix_length = max(seq1_start, seq2_start)
+    prefix1 = "-" * (prefix_length - seq1_start) + seq1[:seq1_start]
+    prefix2 = "-" * (prefix_length - seq2_start) + seq2[:seq2_start]
+
+    suffix1 = seq1[seq1_end:]
+    suffix2 = seq2[seq2_end:]
+    suffix_length = max(len(suffix1), len(suffix2))
+    suffix1 += "-" * (suffix_length - len(suffix1))
+    suffix2 += "-" * (suffix_length - len(suffix2))
+
+    start = prefix_length
+    end = start + len(aligned_seq1)
+    return (
+        prefix1 + aligned_seq1 + suffix1,
+        prefix2 + aligned_seq2 + suffix2,
+        alignment.score,
+        start,
+        end,
+    )
 
 
 
@@ -242,20 +297,38 @@ class Read(object):
             write_alignment_progress(config, self, "START")
         aligned_read = self
         try:
-            alignment = bio.align.globalds(self.seq, config["REF"], config["COST_ALIGNED"],
-                    config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
-            if alignment:
-                self.al_seq, self.al_ref, self.al_score = alignment[-1][0:3]
+            if self.seq and config["REF"]:
+                aligner = _make_aligner(config, penalize_end_gaps=False)
+                alignments = aligner.align(self.seq, config["REF"])
+            else:
+                alignments = None
+            if alignments is not None and len(alignments):
+                # TODO: This picks one optimal placement by list order; no
+                # biologically meaningful or stable tie-break has been established.
+                alignment = alignments[-1]
+                self.al_seq = str(alignment[0])
+                self.al_ref = str(alignment[1])
+                self.al_score = alignment.score
                 if not self.sense:
                     self.sense = 1
 
             if config["INFER_SENSE_FROM_ALIGNMENT"]:
                 rev = self.reverse_complement()
-                rev_alignment = bio.align.globalds(rev.seq, config["REF"], config["COST_ALIGNED"],
-                    config["COST_GAPOPEN"], config["COST_GAPEXTEND"], penalize_end_gaps=False)
-                if (rev_alignment and
-                        (self.al_score is None or rev_alignment[-1][2] > self.al_score)):
-                    rev.al_seq, rev.al_ref, rev.al_score = rev_alignment[-1][0:3]
+                if rev.seq and config["REF"]:
+                    rev_alignments = _make_aligner(
+                        config, penalize_end_gaps=False
+                    ).align(rev.seq, config["REF"])
+                else:
+                    rev_alignments = None
+                if (rev_alignments is not None and len(rev_alignments) and
+                        (self.al_score is None or
+                         rev_alignments[-1].score > self.al_score)):
+                    # The same list-order tie caveat applies to reverse-strand
+                    # placements; equal forward/reverse scores keep the forward read.
+                    alignment = rev_alignments[-1]
+                    rev.al_seq = str(alignment[0])
+                    rev.al_ref = str(alignment[1])
+                    rev.al_score = alignment.score
                     if not rev.sense:
                         rev.sense = -1
                     aligned_read = rev
@@ -441,10 +514,10 @@ class Read(object):
         al = connect_alignment(read.al_seq, read.al_ref)
         al_len = len(read.al_seq)
 
-        command = 'bio.align.globalcs'
+        command = 'PairwiseAligner.align'
         command_seq = 'read.seq'
         command_ref = 'REF'
-        command_score_function = "get_alignment_score"
+        command_score_function = "COST_ALIGNED"
 
         width = 50
         pre_width = 20
@@ -793,8 +866,17 @@ class Insert(object):
             ITD if the Insert qualifies as one.
             None otherwise.
         """
-        alignments = bio.align.localds(self.seq, config["REF"], config["COST_ALIGNED"], config["COST_GAPOPEN"], config["COST_GAPEXTEND"])
-        alignments = [al for al in alignments if integral_insert_realignment(al[0],self.length)]
+        if not self.seq or not config["REF"]:
+            return None
+        aligner = _make_aligner(config, mode="local")
+        alignments = [
+            _local_alignment_to_tuple(alignment, self.seq, config["REF"])
+            for alignment in aligner.align(self.seq, config["REF"])
+        ]
+        alignments = [
+            alignment for alignment in alignments
+            if integral_insert_realignment(alignment[0], self.length)
+        ]
         # exclude alignments where the presumable WT tandem overlaps the insertion site (happens with short inserts such as
         # the following, where GA------ATAT is followed by another GAATAT, which both equally well map to the insert
         #                   1 ----------------------------------CAATATATATGAATAT     16
@@ -806,9 +888,9 @@ class Insert(object):
         alignments = [al for al in alignments if self.start < get_first_aligned_bp_index(al[0]) or self.start >= get_first_aligned_bp_index(al[0]) + self.length -1]
         if not alignments:
             return None
-        # bio.align arguments: seq1, seq2, match-score, mismatch-score, gapopen-score, gapextend-score
-        # output: list of optimal alignments, each a list of seq1, seq2, score, start-idx, end-idx
-        # to print: print(bio.format_alignment(*alignment))
+        # The tuple contains aligned sequences, score, and alignment coordinates.
+        # TODO: The final optimal placement is selected by aligner list order;
+        # define and test an explicit tie-break policy before relying on it.
         alignment = alignments[-1]
         alignment_score, alignment_start, alignment_end = alignment[2:5]
         if alignment_score >= get_min_score(self.seq, config["REF"], config["MIN_SCORE_INSERTS"]):
@@ -853,9 +935,8 @@ class Insert(object):
                         _file.write("\t")
                         _file.write(self.reads[0].seq)
                         _file.write("\n")
-                    #self.print()
-                    #self.reads[0].print()
-                    #print(bio.format_alignment(*alignment))
+                        #self.print()
+                        #self.reads[0].print()
                     #print("alignment_start: {}".format(alignment_start))
                     #print("alignment_end: {}".format(alignment_end))
         return None
@@ -971,12 +1052,11 @@ class Insert(object):
             True when they are similar, False otherwise.
         """
         min_score = get_min_score(self.seq, that.seq, config["MIN_SCORE_INSERTS"])
-        al_score = bio.align.globalds(self.seq, that.seq, config["COST_ALIGNED"], config["COST_GAPOPEN"], config["COST_GAPEXTEND"], one_alignment_only=True, score_only=True, penalize_end_gaps=False)
-        # Bio.pairwise2 returns an empty list (not a float) when one of the
-        # sequences is empty and no alignment can be computed; treat that as
-        # "not similar" instead of crashing on `[] >= min_score`.
-        if isinstance(al_score, list):
+        if not self.seq or not that.seq:
             return False
+        al_score = _make_aligner(config, penalize_end_gaps=False).score(
+            self.seq, that.seq
+        )
         if al_score >= min_score:
             return True
         return False
@@ -1284,15 +1364,10 @@ def get_first_aligned_bp_index(alignment_seq):
     """
     Given an alignment string, return the index of the first aligned,
     i.e. non-gap position (0-indexed!).
-
-    Args:
-        alignment_seq (string): String of aligned sequence, consisting of
-            gaps ('-') and non-gap characters, such as "HA-LO" or "----ALO".
-
-    Returns:
-        Integer, >= 0, indicating the first non-gap character within alignment_seq.
     """
-    index_of_first_aligned_bp =  [i for i,bp in enumerate(alignment_seq) if bp != '-'][0]
+    index_of_first_aligned_bp = [
+        i for i, bp in enumerate(alignment_seq) if bp != '-'
+    ][0]
     return index_of_first_aligned_bp
 
 
@@ -1570,7 +1645,7 @@ def integral_insert_realignment(insert_alignment, insert_length):
 
     Args:
         insert_alignment (str): Alignment string of insert relative to
-                WT reference, output by bio.align.localcs().
+                WT reference, output by PairwiseAligner.align().
         insert_length:  Length / number of bp of the insert.
 
     Returns:
